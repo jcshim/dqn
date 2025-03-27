@@ -1,0 +1,132 @@
+import gym
+import pygame
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import random
+from collections import deque
+
+if not hasattr(np, 'bool8'): np.bool8 = np.bool_
+# --- Pygame 시각화 설정 ---
+pygame.init()
+screen_width, screen_height = 600, 400
+screen = pygame.display.set_mode((screen_width, screen_height))
+clock = pygame.time.Clock()
+
+# --- DQN 모델 정의 ---
+class DQN(nn.Module):
+    def __init__(self, state_size, action_size):
+        super(DQN, self).__init__()
+        self.fc1 = nn.Linear(state_size, 128)
+        self.fc2 = nn.Linear(128, 128)
+        self.out = nn.Linear(128, action_size)
+
+    def forward(self, x):
+        x = torch.relu(self.fc1(x))
+        x = torch.relu(self.fc2(x))
+        return self.out(x)
+
+# --- Experience Replay Buffer ---
+class ReplayBuffer:
+    def __init__(self, capacity=10000):
+        self.buffer = deque(maxlen=capacity)
+
+    def push(self, state, action, reward, next_state, done):
+        self.buffer.append((state, action, reward, next_state, done))
+
+    def sample(self, batch_size=64):
+        batch = random.sample(self.buffer, batch_size)
+        states, actions, rewards, next_states, dones = zip(*batch)
+        return (
+            torch.tensor(states, dtype=torch.float32),
+            torch.tensor(actions, dtype=torch.long),
+            torch.tensor(rewards, dtype=torch.float32),
+            torch.tensor(next_states, dtype=torch.float32),
+            torch.tensor(dones, dtype=torch.float32),
+        )
+
+    def __len__(self):
+        return len(self.buffer)
+
+# --- 학습 파라미터 설정 ---
+env = gym.make("CartPole-v1")
+state_size = env.observation_space.shape[0]
+action_size = env.action_space.n
+
+model = DQN(state_size, action_size)
+optimizer = optim.Adam(model.parameters(), lr=0.001)
+criterion = nn.MSELoss()
+buffer = ReplayBuffer()
+
+epsilon = 1.0
+epsilon_decay = 0.995
+epsilon_min = 0.05
+gamma = 0.99
+
+# --- 학습 루프 ---
+num_episodes = 300
+for episode in range(num_episodes):
+    state, _ = env.reset()
+    total_reward = 0
+    done = False
+
+    while not done:
+        # --- 행동 선택 ---
+        if np.random.rand() < epsilon:
+            action = env.action_space.sample()
+        else:
+            with torch.no_grad():
+                state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
+                q_values = model(state_tensor)
+                action = q_values.argmax().item()
+
+        # --- 환경과 상호작용 ---
+        next_state, reward, terminated, truncated, _ = env.step(action)
+        done = terminated or truncated
+        total_reward += reward
+
+        buffer.push(state, action, reward, next_state, done)
+        state = next_state
+
+        # --- 모델 학습 ---
+        if len(buffer) > 64:
+            states, actions, rewards, next_states, dones = buffer.sample()
+
+            q_values = model(states).gather(1, actions.unsqueeze(1)).squeeze()
+            with torch.no_grad():
+                max_next_q_values = model(next_states).max(1)[0]
+                target_q_values = rewards + gamma * max_next_q_values * (1 - dones)
+
+            loss = criterion(q_values, target_q_values)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+        # --- Pygame 시각화 ---
+        screen.fill((255, 255, 255))
+        cart_x = int(state[0] * screen_width / 4.8 + screen_width / 2)
+        pole_angle = state[2]
+        pole_length = 100
+
+        pole_x = cart_x + int(np.sin(pole_angle) * pole_length)
+        pole_y = screen_height // 2 - int(np.cos(pole_angle) * pole_length)
+
+        pygame.draw.rect(screen, (0, 0, 0), (cart_x - 20, screen_height // 2 - 10, 40, 20))
+        pygame.draw.line(screen, (0, 0, 255), (cart_x, screen_height // 2), (pole_x, pole_y), 5)
+        pygame.display.update()
+        clock.tick(60)
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                quit()
+
+    # --- 에피소드 종료 후 ---
+    if epsilon > epsilon_min:
+        epsilon *= epsilon_decay
+
+    print(f"Episode {episode + 1} - Total Reward: {total_reward:.2f}, Epsilon: {epsilon:.3f}")
+
+pygame.quit()
